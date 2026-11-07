@@ -16,6 +16,11 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
+import java.util.Locale;
 
 public class FaceitWidgetProvider extends AppWidgetProvider {
     @Override public void onUpdate(Context context, AppWidgetManager manager, int[] ids) {
@@ -38,6 +43,7 @@ public class FaceitWidgetProvider extends AppWidgetProvider {
         String steamId = prefs.getString("steam_id", "76561199274700343");
         views.setTextViewText(R.id.nickname, nickname);
         views.setTextViewText(R.id.status, initialStatus);
+        applyCached(views, prefs);
         Intent refresh = new Intent(context, FaceitWidgetProvider.class).setAction("com.elka.faceitwidget.REFRESH");
         Intent open = new Intent(context, MainActivity.class);
         views.setOnClickPendingIntent(R.id.refresh, PendingIntent.getBroadcast(context, 42, refresh, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE));
@@ -74,17 +80,31 @@ public class FaceitWidgetProvider extends AppWidgetProvider {
                 String winRate = metric(lifetime, "Win Rate %");
                 if (!winRate.equals("—") && !winRate.endsWith("%")) winRate += "%";
 
-                final String eloText = elo > 0 ? String.valueOf(elo) : "—";
-                final String kdText = kd;
-                final String wrText = winRate;
+                // Каждый показатель считается полученным, только если он реально пришёл в ответе.
+                // В кэш пишутся только полученные поля: отсутствующее поле не затирает прошлое значение.
+                final boolean hasElo = elo > 0;
+                final boolean hasKd = !kd.equals(NO_DATA);
+                final boolean hasWr = !winRate.equals(NO_DATA);
+                SharedPreferences.Editor cache = prefs.edit();
+                if (hasElo) cache.putString("last_elo", String.valueOf(elo));
+                if (hasKd) cache.putString("last_kd", kd);
+                if (hasWr) cache.putString("last_winrate", winRate);
+                if (hasElo || hasKd || hasWr) cache.putLong("last_ok_time", System.currentTimeMillis());
+                cache.apply();
+
+                List<String> missing = new ArrayList<>();
+                if (!hasElo) missing.add("ELO");
+                if (!hasKd) missing.add("K/D");
+                if (!hasWr) missing.add("Win Rate");
+                final String status;
+                if (missing.isEmpty()) status = "Обновлено " + formatTime(System.currentTimeMillis()) + " · нажми ↻";
+                else if (missing.size() == 3) status = "Статистика не получена" + cachedSuffix(prefs);
+                else status = "Частично: нет " + String.join(", ", missing) + cachedSuffix(prefs);
                 final String nameText = actualNickname;
-                final String status = "Обновлено через WOK · нажми ↻";
                 new android.os.Handler(context.getMainLooper()).post(() -> {
                     RemoteViews out = new RemoteViews(context.getPackageName(), R.layout.widget_faceit);
                     out.setTextViewText(R.id.nickname, nameText);
-                    out.setTextViewText(R.id.elo, eloText);
-                    out.setTextViewText(R.id.kd, kdText);
-                    out.setTextViewText(R.id.winrate, wrText);
+                    applyCached(out, prefs);
                     out.setTextViewText(R.id.status, status);
                     out.setOnClickPendingIntent(R.id.refresh, PendingIntent.getBroadcast(context, 42, refresh, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE));
                     out.setOnClickPendingIntent(R.id.nickname, PendingIntent.getActivity(context, 43, open, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE));
@@ -98,7 +118,8 @@ public class FaceitWidgetProvider extends AppWidgetProvider {
                 else if (message.contains("HTTP 429")) message = "Слишком много запросов; попробуй позже";
                 final String error = message.length() > 55 ? message.substring(0, 52) + "…" : message;
                 new android.os.Handler(context.getMainLooper()).post(() -> {
-                    views.setTextViewText(R.id.status, "Ошибка: " + error);
+                    applyCached(views, prefs);
+                    views.setTextViewText(R.id.status, "Ошибка: " + error + cachedSuffix(prefs));
                     manager.updateAppWidget(id, views);
                 });
             }
@@ -132,5 +153,24 @@ public class FaceitWidgetProvider extends AppWidgetProvider {
     private static String metric(JSONObject json, String key) {
         String value = json.optString(key, "—");
         return value.equals("null") || value.isEmpty() ? "—" : value;
+    }
+
+    private static final String NO_DATA = "—";
+
+    /** Подставляет в виджет последние успешно полученные значения (или «—», если их ещё не было). */
+    private static void applyCached(RemoteViews views, SharedPreferences prefs) {
+        views.setTextViewText(R.id.elo, prefs.getString("last_elo", NO_DATA));
+        views.setTextViewText(R.id.kd, prefs.getString("last_kd", NO_DATA));
+        views.setTextViewText(R.id.winrate, prefs.getString("last_winrate", NO_DATA));
+    }
+
+    /** « · от дд.мм чч:мм» — когда в кэш последний раз попали свежие данные; пусто, если кэша нет. */
+    private static String cachedSuffix(SharedPreferences prefs) {
+        long time = prefs.getLong("last_ok_time", 0L);
+        return time == 0L ? "" : " · от " + formatTime(time);
+    }
+
+    private static String formatTime(long millis) {
+        return new SimpleDateFormat("dd.MM HH:mm", Locale.getDefault()).format(new Date(millis));
     }
 }
